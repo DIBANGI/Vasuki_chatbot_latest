@@ -67,9 +67,7 @@ async def startup_event():
         print("Groq LLM initialized.")
 
         print("Creating LLM chains...")
-        # --- THIS IS THE LINE THAT WAS FIXED ---
-        # OLD: llm_chains = llm_utils.create_llm_chains(llm, embedding_model)
-        # NEW:
+        # This line was part of the refactoring to correctly initialize all chains
         llm_chains = llm_utils.initialize_llm_chains(llm, embedding_model)
         llm_application_components["llm_chains"] = llm_chains
         print("LLM chains created.")
@@ -109,6 +107,7 @@ async def get_home(request: Request):
     """Serves the main HTML page for the chatbot interface."""
     index_html_path = os.path.join(config.STATIC_DIR, "index.html")
     if not os.path.exists(index_html_path):
+        # Fallback for different directory structures
         index_html_path = os.path.join("templates", "index.html")
 
     try:
@@ -163,6 +162,7 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     connection_id_ws = f"ws_conn_{os.urandom(8).hex()}"
     active_connections[connection_id_ws] = websocket
+    print("INFO:     connection open") # Added for clarity
     
     ws_conv_id: Optional[str] = None
 
@@ -189,12 +189,15 @@ async def websocket_endpoint(websocket: WebSocket):
             
             current_ws_history = get_active_session_history(ws_conv_id)
             
+            # --- THIS IS THE FIX ---
+            # The missing `conversation_history` argument is now correctly passed.
             bot_response_text = query_processor.process_query(
                 query_text=query_text,
                 conversation_history=current_ws_history,
                 llm_app_components=llm_application_components,
                 conversation_id=ws_conv_id
             )
+            # --- END FIX ---
             
             # Update history and last activity time
             current_ws_history.append({"role": "user", "content": query_text})

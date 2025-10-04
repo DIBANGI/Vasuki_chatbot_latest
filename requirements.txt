@@ -16,3 +16,4 @@ nest_asyncio
 mysql
 ShopifyAPI
 bs4
+pydantic
