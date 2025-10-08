@@ -55,7 +55,6 @@ def query_faq_context(query_text: str, llm_app_components) -> str:
 
 def process_query(
     query_text: str,
-    conversation_history: List[Dict[str, str]],
     llm_app_components: dict,
     conversation_id: str
 ) -> str:
@@ -114,7 +113,7 @@ def process_query(
         if trigger in query_lower:
             return random.choice(responses)
 
-    print(f"Processing query: '{query_text}' with history length: {len(conversation_history)}")
+    print(f"Processing query: '{query_text}'")
 
     # --- 4. Intent Classification ---
     intent = llm_utils.classify_intent_with_llm(query_text, llm_chains)
@@ -135,20 +134,20 @@ def process_query(
         # --- MODIFIED: Replaced the entire product_query block ---
         elif intent == "product_query":
             print("Handling product query using Shopify QA chain.")
-            
+
             # 1. Get relevant product context from our new Shopify vector store
             context = get_context_from_vector_store(query_text, "products", llm_app_components)
-            
+
             if not context:
                 draft_response = "I'm sorry, I couldn't find any products that match your description. You can browse our full collection at https://shopvasuki.com/"
             else:
                 # 2. Prepare the input for our dedicated Shopify QA chain
                 # The chain expects a list of Langchain Document objects for the context
                 chain_input = {
-                    "input_documents": [Document(page_content=context)], 
+                    "input_documents": [Document(page_content=context)],
                     "question": query_text
                 }
-                
+
                 # 3. Run the chain to get a natural language answer
                 # The key "output_text" is the default for load_qa_chain
                 draft_response = llm_chains["shopify_qa"].invoke(chain_input).get("output_text", "Sorry, I had trouble generating a response.")
@@ -156,16 +155,16 @@ def process_query(
 
         elif intent.endswith("_policy"):
             policy_type_key = intent.split('_')[0]
-            chain_input = {"question": query_text, "history": conversation_history, "context": query_policy_context(query_text, policy_type_key, llm_app_components)}
+            chain_input = {"question": query_text, "context": query_policy_context(query_text, policy_type_key, llm_app_components)}
             draft_response = llm_chains["policy"].invoke(chain_input)
 
         elif intent == "general_faq":
             if "what is vasuki" in query_text.lower():
                 draft_response = "VASUKI is a distinguished jewelry company, known for its exquisite craftsmanship and unique designs."
             else:
-                chain_input = {"question": query_text, "history": conversation_history, "context": query_faq_context(query_text, llm_app_components)}
+                chain_input = {"question": query_text, "context": query_faq_context(query_text, llm_app_components)}
                 draft_response = llm_chains["faq"].invoke(chain_input)
-        
+
         else:
             draft_response = "I'm sorry, I'm not sure how to help with that. Can I assist with a product search or a policy question?"
 

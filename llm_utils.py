@@ -25,7 +25,7 @@ def get_groq_chat_model():
     print(f"Initializing Groq LLM: {config.LLM_MODEL_ID}")
     if not config.GROQ_API_KEY:
         raise ValueError("GROQ_API_KEY not found in environment variables.")
-    
+
     return ChatGroq(
         temperature=config.LLM_TEMPERATURE,
         model_name=config.LLM_MODEL_ID,
@@ -40,7 +40,6 @@ Always maintain a polite and helpful tone. Only provide information that's avail
 If information is not available, politely say so and offer to help with something else.
 Format prices and measurements consistently (e.g., Price: ₹XX.XX).
 Do not make up information. If the answer is not in the context, say you don't know.
-When answering follow-up questions, use the previous conversation turns for context.
 Directly answer the user's query without any introductory phrases about your own response.
 Do not include emotive expressions or actions in asterisks (e.g., *smiles*).
 """
@@ -83,14 +82,14 @@ This is your single source of truth. Adhere to it strictly.
 """
 
 POLICY_SYSTEM_PROMPT = """You are a customer service specialist for VASUKI Jewelry Store, responsible for explaining our policies clearly and accurately.
-Use ONLY information provided in the context and relevant parts of the conversation history to answer policy-related questions.
+Use ONLY information provided in the context to answer policy-related questions.
 Structure your response in a clear, easy-to-understand format. Highlight key points.
 If specific details aren't available in the context, acknowledge this and suggest they contact customer support directly.
 Directly answer the user's query without any introductory phrases.
 """
 
 FAQ_SYSTEM_PROMPT = """You are a friendly jewelry expert at VASUKI Jewelry Store.
-Answer the customer's question based ONLY on the provided FAQ context and relevant conversation history.
+Answer the customer's question based ONLY on the provided FAQ context.
 Keep responses conversational and natural.
 If the exact question isn't in the FAQ context, state that the information is not available in the FAQs and offer to help with other questions.
 Directly answer the user's query.
@@ -102,7 +101,7 @@ Analyze the user's question and respond with ONLY ONE of the following category 
 RULES:
 - Your response MUST be a single word from the list below.
 - Do NOT add any pleasantries, explanations, or punctuation.
-- Analyze ONLY the LATEST customer question. Ignore conversation history.
+- Analyze ONLY the LATEST customer question.
 
 CATEGORIES:
 - product_query
@@ -115,35 +114,25 @@ CATEGORIES:
 """
 
 REFINEMENT_SYSTEM_PROMPT = """You are a professional customer service specialist.
-Refine the DRAFT RESPONSE to be conversational and customer-friendly, considering the conversation history.
+Refine the DRAFT RESPONSE to be conversational and customer-friendly.
 The final response should directly address the user's query using ONLY the factual information present in the DRAFT RESPONSE.
 DO NOT introduce any new product details, SKUs, prices, or other factual information not already in the draft.
 Remove any technical language and format for easy reading. Add a polite closing if appropriate.
 """
 
 QUERY_REWRITING_SYSTEM_PROMPT = """You are an expert at rephrasing questions. Your task is to rewrite a follow-up question from a user into a self-contained, standalone question.
-Use the conversation history to understand the context.
 The rewritten question should be concise and optimized for a vector database search.
 
 Example 1:
-History:
-User: "Do you have any gold necklaces?"
-Assistant: "Yes, we have several..."
-Current Question: "what about under 10000?"
+Follow-up Question: "what about under 10000?"
 Standalone Question: "gold necklaces under 10000"
 
 Example 2:
-History:
-User: "show me bangle options"
-Assistant: "Here are some bangles..."
-Current Question: "only the silver ones"
+Follow-up Question: "only the silver ones"
 Standalone Question: "silver bangles"
 
 Example 3:
-History:
-User: "tell me about SPSLB0004"
-Assistant: "Here are some details for SPSLB0004..."
-Current Question: "give me more details"
+Follow-up Question: "give me more details"
 Standalone Question: "full details for SPSLB0004"
 
 Respond ONLY with the rewritten standalone question. Do not add any other text.
@@ -156,8 +145,8 @@ PRODUCT_USER_TEMPLATE = "Database Query Results:\n{db_query_results}\n\nContext 
 POLICY_USER_TEMPLATE = "Policy Context:\n{context}\n\nCurrent Question: {question}"
 FAQ_USER_TEMPLATE = "FAQ Context:\n{context}\n\nCurrent Question: {question}"
 INTENT_USER_TEMPLATE = "Customer Question: {question}"
-REFINEMENT_USER_TEMPLATE = "Original Customer Question: {question}\nConversation History (if any):\n{history_string}\n\nDraft Response to Refine:\n{draft_response}"
-QUERY_REWRITING_USER_TEMPLATE = "Conversation History:\n{history_string}\n\nFollow-up Question: {question}"
+REFINEMENT_USER_TEMPLATE = "Original Customer Question: {question}\n\nDraft Response to Refine:\n{draft_response}"
+QUERY_REWRITING_USER_TEMPLATE = "Follow-up Question: {question}"
 
 
 # --- NEW: Function to create the dedicated Shopify QA chain ---
@@ -180,46 +169,13 @@ def get_shopify_product_qa_chain(llm: ChatGroq):
 def initialize_llm_chains(llm: ChatGroq, embedding_model):
     """Creates and returns a dictionary of Langchain chains."""
 
-    # This inner function is from your original code, left as is
-    def create_chain(system_prompt_text, user_template_text, include_retriever_key=None):
+    def create_chain(system_prompt_text, user_template_text):
         prompt = ChatPromptTemplate.from_messages([
             ("system", system_prompt_text),
-            ("placeholder", "{history}"),
             ("human", user_template_text),
         ])
-
-        # This logic is complex, so we'll leave it for the original chains
-        # and create the Shopify chain separately and more simply.
-        def prepare_chain_input(input_dict: Dict):
-            if include_retriever_key and "context" not in input_dict and "db_query_results" not in input_dict:
-                # Using the old get_retriever logic from your code
-                retriever = vector_store_utils.get_langchain_chroma_retriever(
-                    collection_name=config.CHROMA_COLLECTION_POLICIES if include_retriever_key == "policies" else config.CHROMA_COLLECTION_FAQS,
-                    embedding_model=embedding_model,
-                    k_results=3
-                )
-                retrieved_docs = retriever.invoke(input_dict["question"])
-                input_dict["context"] = "\n\n".join([doc.page_content for doc in retrieved_docs])
-            
-            history_messages = []
-            for turn in input_dict.get("history", []):
-                role = turn.get("role")
-                if role == "user":
-                    history_messages.append(HumanMessage(content=turn["content"]))
-                elif role == "assistant":
-                    history_messages.append(AIMessage(content=turn["content"]))
-            input_dict["history"] = history_messages
-            
-            if "history_string" in user_template_text:
-                history_str_parts = [f"{turn['role'].capitalize()}: {turn['content']}" for turn in input_dict.get("raw_history", [])]
-                input_dict["history_string"] = "\n".join(history_str_parts)
-
-            return input_dict
-
         chain = (
-            RunnablePassthrough.assign(raw_history=lambda x: x.get("history", []))
-            | RunnableLambda(prepare_chain_input)
-            | prompt
+            prompt
             | llm
             | StrOutputParser()
         )
@@ -227,16 +183,16 @@ def initialize_llm_chains(llm: ChatGroq, embedding_model):
 
     chains = {
         "intent": create_chain(INTENT_CLASSIFICATION_SYSTEM_PROMPT, INTENT_USER_TEMPLATE),
-        "general": create_chain(DEFAULT_SYSTEM_PROMPT, GENERAL_USER_TEMPLATE, include_retriever_key="faqs"),
-        "product": create_chain(PRODUCT_QUERY_SYSTEM_PROMPT, PRODUCT_USER_TEMPLATE), # This remains for direct DB lookup if needed
-        "policy": create_chain(POLICY_SYSTEM_PROMPT, POLICY_USER_TEMPLATE, include_retriever_key="policies"),
-        "faq": create_chain(FAQ_SYSTEM_PROMPT, FAQ_USER_TEMPLATE, include_retriever_key="faqs"),
+        "general": create_chain(DEFAULT_SYSTEM_PROMPT, GENERAL_USER_TEMPLATE),
+        "product": create_chain(PRODUCT_QUERY_SYSTEM_PROMPT, PRODUCT_USER_TEMPLATE),
+        "policy": create_chain(POLICY_SYSTEM_PROMPT, POLICY_USER_TEMPLATE),
+        "faq": create_chain(FAQ_SYSTEM_PROMPT, FAQ_USER_TEMPLATE),
         "refinement": create_chain(REFINEMENT_SYSTEM_PROMPT, REFINEMENT_USER_TEMPLATE),
         "query_rewriter": create_chain(QUERY_REWRITING_SYSTEM_PROMPT, QUERY_REWRITING_USER_TEMPLATE),
         # --- NEW: Add the dedicated Shopify QA chain to the dictionary ---
         "shopify_qa": get_shopify_product_qa_chain(llm)
     }
-    print("All LLM chains initialized.") # --- NEW ---
+    print("All LLM chains initialized.")
     return chains
 
 def classify_intent_with_llm(query: str, llm_chains) -> str:
@@ -244,21 +200,21 @@ def classify_intent_with_llm(query: str, llm_chains) -> str:
     if "intent" not in llm_chains:
         return "other"
     try:
-        response = llm_chains["intent"].invoke({"question": query, "history": []})
+        response = llm_chains["intent"].invoke({"question": query})
         cleaned_intent = response.strip().lower().replace(".", "")
-        
+
         valid_intents = [
-            "product_query", "return_policy", "shipping_policy", 
+            "product_query", "return_policy", "shipping_policy",
             "privacy_policy", "general_faq", "greeting", "other"
         ]
-        
+
         if cleaned_intent in valid_intents:
             return cleaned_intent
-        
+
         for intent in valid_intents:
             if intent in cleaned_intent:
                 return intent
-                
+
         return "other"
     except Exception as e:
         print(f"Error during LLM intent classification: {e}")
