@@ -5,8 +5,7 @@ import pandas as pd
 import chromadb
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_chroma import Chroma
-from typing import Optional, Dict
+from langchain_chroma import Chroma # Corrected import
 
 import config
 import database_utils
@@ -18,32 +17,27 @@ def init_chroma_client():
     return client
 
 def get_chroma_collections(client: chromadb.PersistentClient, embedding_func):
-    """Gets or creates all necessary ChromaDB collections."""
+    """Gets or creates ChromaDB collections."""
     collections = {}
     collection_names_map = {
         "faqs": config.CHROMA_COLLECTION_FAQS,
         "policies": config.CHROMA_COLLECTION_POLICIES,
-        "products": "shopify_products",  # Use the new Shopify collection name
+        "products": config.CHROMA_COLLECTION_PRODUCTS,
     }
     for name_key, collection_name_val in collection_names_map.items():
         try:
-            collection = client.get_or_create_collection(
-                name=collection_name_val,
-                # metadata={"hnsw:space": "cosine"} # Optional: specify distance function
-            )
+            collection = client.get_or_create_collection(name=collection_name_val, embedding_function=embedding_func)
             print(f"Retrieved/Created collection: {collection_name_val}")
-            collections[name_key] = collection
         except Exception as e:
-            print(f"Error getting or creating collection {collection_name_val}: {e}")
+            print(f"Error getting/creating collection {collection_name_val}: {e}")
+            # As a fallback, try creating it directly if get_or_create fails in some versions
+            collection = client.create_collection(name=collection_name_val, embedding_function=embedding_func, get_or_create=True)
+        collections[name_key] = collection
     return collections
 
-def load_documents_for_vector_store():
-    """
-    Loads and processes documents from static files (FAQs, Policies).
-    The product loading is now handled separately by the Shopify-specific function.
-    """
-    all_data = {}
 
+def load_documents_for_vector_store():
+    """Loads and processes documents from files and database for ChromaDB embedding."""
     # --- Load FAQs ---
     faq_docs, faq_ids, faq_metadata = [], [], []
     try:
@@ -57,10 +51,17 @@ def load_documents_for_vector_store():
             faq_docs.append(f"Question: {question}\nAnswer: {answer}")
             faq_ids.append(f"faq_{idx}_main")
             faq_metadata.append({"type": "faq", "question": question, "source": config.FAQS_FILE_PATH})
+
+            for i in range(1, 4):
+                var_col = f"Variation {i}"
+                if var_col in row and pd.notna(row[var_col]):
+                    variation = str(row[var_col]).strip()
+                    if variation:
+                        faq_docs.append(f"Question: {variation}\nAnswer: {answer}")
+                        faq_ids.append(f"faq_{idx}_var{i}")
+                        faq_metadata.append({"type": "faq", "question": variation, "source": config.FAQS_FILE_PATH})
     except Exception as e:
         print(f"Error loading FAQs from {config.FAQS_FILE_PATH}: {e}")
-    
-    all_data["faqs"] = {"documents": faq_docs, "ids": faq_ids, "metadatas": faq_metadata}
 
     # --- Load Policy Documents ---
     policy_docs, policy_ids, policy_metadata = [], [], []
@@ -74,17 +75,65 @@ def load_documents_for_vector_store():
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 content = f.read()
+            print(f"Successfully loaded {file_path} with {len(content)} characters")
             chunks = text_splitter.split_text(content)
             for i, chunk in enumerate(chunks):
                 policy_docs.append(chunk)
                 policy_ids.append(f"{policy_type}_{i}")
-                policy_metadata.append({"type": "policy", "policy_type": policy_type, "source": file_path})
+                policy_metadata.append({"type": "policy", "policy_type": policy_type, "source": file_path, "chunk": i})
         except Exception as e:
             print(f"Error loading policy file {file_path}: {e}")
 
-    all_data["policies"] = {"documents": policy_docs, "ids": policy_ids, "metadatas": policy_metadata}
+    # --- Load Product Information from SQL Database ---
+    product_docs, product_ids, product_metadata = [], [], []
+    conn = database_utils.get_db_connection()
+    if conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT i.`SKU Number`, c.category_name, c.subcategory_name,
+                       s.stone_name, cl.color_name, f.finish_name,
+                       i.`Weight`, i.length, i.width, p.`Final SP` as unit_price,
+                       i.`Status`, i.`Year of Purchase`
+                FROM inventory_items i
+                LEFT JOIN categories c ON i.category_id = c.id
+                LEFT JOIN stones s ON i.stone_id = s.id
+                LEFT JOIN colors cl ON i.color_id = cl.id
+                LEFT JOIN finishes f ON i.finish_id = f.id
+                LEFT JOIN pricing p ON i.`SKU Number` = p.`SKU Number`
+            """)
+            products_from_db = cursor.fetchall()
+            print(f"Loaded {len(products_from_db)} products from database for embedding.")
+            for prod_idx, product in enumerate(products_from_db):
+                clean_product = {k: (v if v is not None else "") for k, v in dict(product).items()}
+                
+                product_text_parts = [
+                    f"Product: {clean_product['category_name']} {clean_product['subcategory_name']}".strip(),
+                    f"SKU: {clean_product['SKU Number']}"
+                ]
+                if clean_product.get('stone_name'): product_text_parts.append(f"Stone: {clean_product['stone_name']}")
+                
+                price = float(clean_product.get('unit_price', 0.0) or 0.0)
+                product_text_parts.append(f"Price: ₹{price:.2f}")
+                
+                product_text = "\n".join(filter(None, product_text_parts))
+                product_docs.append(product_text)
+                product_ids.append(f"product_{clean_product['SKU Number']}_{prod_idx}")
+                product_metadata.append({
+                    "type": "product", "sku": str(clean_product['SKU Number']),
+                    "category": clean_product.get('category_name', ""),
+                    "price": price, "source": "database"
+                })
+        except Exception as e:
+            print(f"Error loading product data from SQL for embedding: {e}")
+        finally:
+            if conn: conn.close()
     
-    return all_data
+    return {
+        "faqs": {"documents": faq_docs, "ids": faq_ids, "metadatas": faq_metadata},
+        "policies": {"documents": policy_docs, "ids": policy_ids, "metadatas": policy_metadata},
+        "products": {"documents": product_docs, "ids": product_ids, "metadatas": product_metadata}
+    }
 
 def validate_metadata(metadata_list: list) -> list:
     """Ensures all metadata values are valid types for ChromaDB."""
@@ -96,7 +145,6 @@ def validate_metadata(metadata_list: list) -> list:
                 if isinstance(value, (str, int, float, bool)):
                     validated_item[key] = value
                 elif value is None:
-                    # ChromaDB prefers not to have None values. Use an empty string or a default.
                     validated_item[key] = ""
                 else:
                     validated_item[key] = str(value)
@@ -104,16 +152,10 @@ def validate_metadata(metadata_list: list) -> list:
     return valid_metadata_list
 
 def add_documents_in_batches(collection, documents: list, ids: list, metadatas: list, batch_size=100):
-    """Adds documents to a ChromaDB collection in batches, with validation."""
-    if not all(isinstance(lst, list) for lst in [documents, ids, metadatas]):
-        print("Error: Input data must be lists.")
-        return False
-    if not (len(documents) == len(ids) == len(metadatas)):
-        print("Error: Document, ID, and metadata lists must be the same length.")
-        return False
-    if not documents:
-        print("No documents to add.")
-        return True
+    """Adds documents to a ChromaDB collection in batches."""
+    if not all(isinstance(lst, list) for lst in [documents, ids, metadatas]): return False
+    if not (len(documents) == len(ids) == len(metadatas)): return False
+    if not documents: return True
 
     for i in range(0, len(documents), batch_size):
         batch_docs = documents[i:i + batch_size]
@@ -123,85 +165,31 @@ def add_documents_in_batches(collection, documents: list, ids: list, metadatas: 
 
         try:
             collection.add(documents=batch_docs, ids=batch_ids, metadatas=batch_meta_validated)
-            print(f"Added batch {i//batch_size + 1}/{ -(-len(documents) // batch_size)} to '{collection.name}'.")
+            print(f"Added batch {i//batch_size + 1} to '{collection.name}'.")
         except Exception as e:
             print(f"Error adding batch {i//batch_size + 1} to '{collection.name}': {e}")
-            continue # Continue with the next batch
+            continue
     return True
 
 def safely_clear_collection(collection):
     """Safely clears all documents from a ChromaDB collection."""
     try:
         count = collection.count()
-        if count == 0:
-            return True
-        # Fetch all items without payload to just get IDs
-        all_items = collection.get(limit=count, include=[])
+        if count == 0: return True
+        all_items = collection.get(include=[])
         if all_items and all_items['ids']:
             collection.delete(ids=all_items['ids'])
-        
-        final_count = collection.count()
-        if final_count == 0:
-            print(f"Successfully cleared {count} items from '{collection.name}'.")
-            return True
-        else:
-            print(f"Warning: After deletion, {final_count} items still remain in '{collection.name}'.")
-            return False
+        return collection.count() == 0
     except Exception as e:
         print(f"Error clearing collection '{collection.name}': {e}")
         return False
 
-# --- REFACTORED: This is the key change for hybrid search ---
-def get_langchain_chroma_retriever(
-    collection_name: str, 
-    embedding_model, 
-    k_results: int = 5, 
-    filter_criteria: Optional[Dict] = None
-):
-    """
-    Creates a Langchain Chroma retriever for a given collection with optional metadata filtering.
-    """
+def get_langchain_chroma_retriever(collection_name: str, embedding_model, k_results=3):
+    """Creates a Langchain Chroma retriever for a given collection."""
     vectorstore = Chroma(
         client=init_chroma_client(),
         collection_name=collection_name,
         embedding_function=embedding_model,
         persist_directory=config.CHROMA_PERSIST_DIRECTORY
     )
-    
-    search_kwargs = {"k": k_results}
-    if filter_criteria:
-        # The 'where' clause is used for metadata filtering in ChromaDB
-        search_kwargs["filter"] = filter_criteria
-        print(f"Retriever for '{collection_name}' created with filter: {filter_criteria}")
-        
-    return vectorstore.as_retriever(search_kwargs=search_kwargs)
-
-def get_context_from_vector_store(query_text: str, collection_key: str, llm_app_components):
-    """Helper to retrieve context from a specific vector store collection."""
-    if not llm_app_components or "embedding_model" not in llm_app_components:
-        print("Error: Embedding model not available.")
-        return ""
-
-    collection_name_map = {
-        "faqs": config.CHROMA_COLLECTION_FAQS,
-        "policies": config.CHROMA_COLLECTION_POLICIES,
-        "products": "shopify_products",
-    }
-    
-    collection_name = collection_name_map.get(collection_key)
-    if not collection_name:
-        print(f"Warning: Invalid collection key '{collection_key}'.")
-        return ""
-
-    try:
-        retriever = get_langchain_chroma_retriever(
-            collection_name=collection_name,
-            embedding_model=llm_app_components["embedding_model"],
-            k_results=5 # Retrieve a decent number of docs for context
-        )
-        retrieved_docs = retriever.invoke(query_text)
-        context = "\n\n".join([doc.page_content for doc in retrieved_docs])
-        return context
-    except Exception as e:
-        print(f"Error retrieving context from '{collection_key}': {e}")
-        return ""
+    return vectorstore.as_retriever(search_kwargs={"k": k_results})
