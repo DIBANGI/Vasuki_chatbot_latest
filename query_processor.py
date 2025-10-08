@@ -110,7 +110,7 @@ def process_query(
         "hey": ["Hey there! How can I assist you?", "Hey! I'm Vasuki. Let me know what you need."]
     }
     for trigger, responses in greetings.items():
-        if trigger in query_lower:
+         if re.search(r"\b" + re.escape(trigger) + r"\b", query_lower):
             return random.choice(responses)
 
     print(f"Processing query: '{query_text}'")
